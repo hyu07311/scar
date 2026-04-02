@@ -1,0 +1,36 @@
+# ──────────────────────────────────────────────────────────
+#  scar_params.yaml  — scar_state_manager 파라미터 서버
+#
+#  ✅ = 실측 확인값  ⚠️ = 실측 후 수정 필요
+# ──────────────────────────────────────────────────────────
+scar_state_manager:
+  ros__parameters:
+
+    # ── 로봇 기구 치수 ──────────────────────────────────
+    wheel_radius: 0.12          # ✅ 실측 12cm (코드 기본값 0.075 → 오버라이드)
+    wheel_base_x: 0.72          # ✅ 실측 전후 축 간 거리 72cm (코드 기본값 0.30 → 오버라이드)
+    wheel_track:  0.34          # ✅ 실측 좌우 바퀴 중심 간 거리 34cm (코드 기본값 0.28 → 오버라이드)
+
+    # ── 속도 설정 ───────────────────────────────────────
+    speed_approach_mps:  0.15   # ✅ STAIR_APPROACH 전진 속도
+    speed_climb_f_mps:   0.25   # ✅ FRONT_CLIMB 전륜 속도
+    speed_climb_r_mps:   0.22   # ✅ FRONT_CLIMB 후륜 속도
+    speed_crab_mps:      0.20   # ✅ CRAB_WALK_CLEAN 크랩 이동 속도
+    speed_align_mps:     0.10   # ✅ VISION_ALIGN 정렬 속도
+    speed_return_mps:    0.20   # ✅ RETURN_LEFT_RUN 복귀 속도
+    speed_slow_mps:      0.05   # ✅ 저속 접근 속도
+
+    # ── 계단 접촉 감지 임계값 (Dynamixel Present Load 0~1023) ─
+    load_stair_contact:  500    # ⚠️ 실측 후 수정: 계단에 바퀴가 올라탈 때 부하
+    load_stair_stable:   200    # ⚠️ 실측 후 수정: 등반 후 안정화 판단 부하
+    load_diff_limit:     250    # ⚠️ 실측 후 수정: FL/FR 부하 차이 허용 한계 (PATS)
+
+    # ── 로드셀 임계값 ───────────────────────────────────
+    lc_contact_kg:       1.0    # ✅ 청소 모듈 접지 판단 임계값 (kg)
+
+    # ── 비전 정렬 ───────────────────────────────────────
+    vision_align_tol:    0.05   # ✅ VISION_ALIGN 완료 기준 오차 (m)
+
+    # ── 슬라이드 밀착량 ─────────────────────────────────
+    slide_right_delta:   500    # ⚠️ 실측 후 수정: 브러시 우측 밀착 pulse량
+    slide_left_delta:    500    # ⚠️ 실측 후 수정: 브러시 좌측 밀착 pulse량
