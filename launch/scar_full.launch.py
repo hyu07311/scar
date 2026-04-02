@@ -29,7 +29,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     scar_bringup_share  = get_package_share_directory('scar_bringup')
-    my_stair_share      = get_package_share_directory('my_stair_mapping')
+    my_stair_share      = get_package_share_directory('stair_mapping')
     scar_nav_share      = get_package_share_directory('scar_navigation')
 
     scar_params         = os.path.join(scar_bringup_share,  'config', 'scar_params.yaml')
