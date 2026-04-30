@@ -346,6 +346,11 @@ class ScarStateManager : public rclcpp::Node {
   bool fl_climbed_ = false, fr_climbed_ = false;
   bool rl_climbed_ = false, rr_climbed_ = false;
 
+  // CLEANING_DOWN 접지 플래그 (transition()에서 리셋)
+  bool act1_grounded_ = false;
+  bool act2_grounded_ = false;
+  rclcpp::Time both_grounded_t_{0, 0, RCL_ROS_TIME};
+
   double stabilized_pitch_ = 0.0;
 
   PID pid_cp_{6.0, 0.2, 0.8, 50.0};   // Crab Pitch PID
@@ -481,6 +486,8 @@ class ScarStateManager : public rclcpp::Node {
     state_          = next;
     entry_t_        = now;
     fl_climbed_     = fr_climbed_ = rl_climbed_ = rr_climbed_ = false;
+    act1_grounded_ = act2_grounded_ = false;
+    both_grounded_t_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
     slide_cmd_sent_ = false;
     pid_cp_.reset(); pid_cy_.reset();
   }
@@ -833,21 +840,38 @@ class ScarStateManager : public rclcpp::Node {
        *    - 좌/우 독립 감지 → 각자 접지 완료 시 해당 모터 정지
        * ────────────────────────────────────────────────────────── */
       case State::CLEANING_DOWN: {
-        bool lc1 = (s.loadcell_l >= (float)lc_kg_);
-        bool lc2 = (s.loadcell_r >= (float)lc_kg_);
-        cmd.target_actuator_1 = lc1 ? 0 : ACT_DOWN;
-        cmd.target_actuator_2 = lc2 ? 0 : ACT_DOWN;
+        // 진입 후 1.5초간 모터 진동 스파이크 무시
+        bool stable = (elapsed(now) > 1.5);
+
+        if (stable) {
+          if (!act1_grounded_ && fabsf(s.loadcell_l) >= (float)lc_kg_) {
+            act1_grounded_ = true;
+            RCLCPP_INFO(get_logger(), "[CLEANING_DOWN] ACT1(L) 접지 (%.2f kg)", s.loadcell_l);
+          }
+          if (!act2_grounded_ && fabsf(s.loadcell_r) >= (float)lc_kg_) {
+            act2_grounded_ = true;
+            RCLCPP_INFO(get_logger(), "[CLEANING_DOWN] ACT2(R) 접지 (%.2f kg)", s.loadcell_r);
+          }
+        }
+
+        cmd.target_actuator_1 = act1_grounded_ ? 0 : ACT_DOWN;
+        cmd.target_actuator_2 = act2_grounded_ ? 0 : ACT_DOWN;
 
         auto ws = ik_steer_only(-M_PI / 2.0, -M_PI / 2.0);
         cmd.target_steer_pos_l = ws.steer_f;
         cmd.target_steer_pos_r = ws.steer_r;
 
-        if (lc1 && lc2) {
-          RCLCPP_INFO(get_logger(),
-            "[CLEANING_DOWN] 양측 접지 (%.2f/%.2f kg) → CRAB_WALK_CLEAN",
-            s.loadcell_l, s.loadcell_r);
-          transition(State::CRAB_WALK_CLEAN, now);
-        } else if (elapsed(now) > 8.0) {
+        if (act1_grounded_ && act2_grounded_) {
+          if (both_grounded_t_.nanoseconds() == 0) {
+            both_grounded_t_ = now;
+            RCLCPP_INFO(get_logger(), "[CLEANING_DOWN] 양측 접지 완료. 3초 대기...");
+          } else if ((now - both_grounded_t_).seconds() >= 3.0) {
+            RCLCPP_INFO(get_logger(),
+              "[CLEANING_DOWN] 3초 경과 → CRAB_WALK_CLEAN (%.2f/%.2f kg)",
+              s.loadcell_l, s.loadcell_r);
+            transition(State::CRAB_WALK_CLEAN, now);
+          }
+        } else if (elapsed(now) > 12.0) {
           RCLCPP_WARN(get_logger(), "[CLEANING_DOWN] 타임아웃 → RECOVERY_UP");
           transition(State::RECOVERY_UP, now);
         }
