@@ -225,13 +225,6 @@ class ScarStateManager : public rclcpp::Node {
     // 인체 감지 임계 거리 (person_node에서 Bool로 변환되어 오지만 예비)
     human_stop_dist_ = declare_parameter("human_stop_distance", 3.0);
 
-    // 데모 환경 시간 기반 제어 (초음파/슬라이드 위치 대체)
-    time_pole_align_s_  = declare_parameter("time_pole_align_s",  3.0);
-    time_crab_clean_s_  = declare_parameter("time_crab_clean_s",  3.0);
-    time_return_left_s_ = declare_parameter("time_return_left_s", 3.0);
-    time_slide_right_s_ = declare_parameter("time_slide_right_s", 1.5);
-    time_slide_left_s_  = declare_parameter("time_slide_left_s",  1.5);
-
     /* ── [5.2] ROS 인터페이스 ────────────────────────────────── */
     cmd_pub_ = create_publisher<ScarCmd>("/scar_cmd", 10);
 
@@ -331,8 +324,6 @@ class ScarStateManager : public rclcpp::Node {
   int16_t load_contact_, load_stable_, load_diff_, load_emg_;
   double  lc_kg_, vision_tol_, human_stop_dist_;
   int32_t slide_r_delta_, slide_l_delta_;
-  double  time_pole_align_s_, time_crab_clean_s_, time_return_left_s_;
-  double  time_slide_right_s_, time_slide_left_s_;
 
   /* ── 조향 zero 기준 ──────────────────────────────────────────── */
   bool    steer_zeroed_ = false;
@@ -393,7 +384,11 @@ class ScarStateManager : public rclcpp::Node {
    *    - 인체 감지로 HUMAN_PAUSE 중 (경광등이 켜져 있으면 혼동 가능)
    * ================================================================ */
   int8_t compute_warning_light() const {
-    return 0;  // 발표 버전: 경광등 항상 OFF
+    if (mode_ == RobotMode::KEYBOARD)        return 0;
+    if (state_ == State::IDLE)               return 0;
+    if (state_ == State::EMERGENCY_STOP)     return 0;
+    if (state_ == State::HUMAN_PAUSE)        return 0;
+    return 1;
   }
 
   /* ================================================================
@@ -805,17 +800,19 @@ class ScarStateManager : public rclcpp::Node {
         break;
 
       /* ──────────────────────────────────────────────────────────
-       *  POLE_Y_ALIGN: 우측 크랩으로 time_pole_align_s 동안 이동
-       *  (데모: 초음파 대신 시간 기반)
+       *  POLE_Y_ALIGN: 우측 크랩으로 이동하며 좌측 초음파로 봉 감지
        * ────────────────────────────────────────────────────────── */
       case State::POLE_Y_ALIGN: {
         pack_wheel(cmd, ik_crab(-spd_align_));  // 우측 이동
-        if (elapsed(now) > time_pole_align_s_) {
+        if (s.ultrasonic_left < US_POLE_DIST) {
           stabilized_pitch_ = s.pitch_angle;
           RCLCPP_INFO(get_logger(),
-            "[POLE_Y_ALIGN] %.1fs 경과 → TILTED_CLEAN_INIT (pitch_ref=%.2f°)",
-            time_pole_align_s_, stabilized_pitch_);
+            "[POLE_Y_ALIGN] 봉 감지 (%.3fm), pitch_ref=%.2f°",
+            s.ultrasonic_left, stabilized_pitch_);
           transition(State::TILTED_CLEAN_INIT, now);
+        } else if (elapsed(now) > 8.0) {
+          RCLCPP_WARN(get_logger(), "[POLE_Y_ALIGN] 타임아웃 → IDLE");
+          transition(State::IDLE, now);
         }
         break;
       }
@@ -906,9 +903,10 @@ class ScarStateManager : public rclcpp::Node {
         cmd.target_brush_speed = BRUSH_SPEED;
         cmd.target_suction_pwm = SUCTION_ON;
 
-        if (elapsed(now) > time_crab_clean_s_) {
+        if (s.ultrasonic_right < US_WALL_DIST || elapsed(now) > 6.0) {
           RCLCPP_INFO(get_logger(),
-            "[CRAB_WALK] %.1fs 경과 → CLEAN_STABILIZE", time_crab_clean_s_);
+            "[CRAB_WALK] 완료 (R=%.3fm) → CLEAN_STABILIZE",
+            s.ultrasonic_right);
           transition(State::CLEAN_STABILIZE, now);
         }
         break;
@@ -933,9 +931,13 @@ class ScarStateManager : public rclcpp::Node {
         }
         apply_slide(cmd, SlideDir::RIGHT);
 
-        if (elapsed(now) > time_slide_right_s_) {
+        if (slide_reached(s, SlideDir::RIGHT)) {
           RCLCPP_INFO(get_logger(),
-            "[CLEAN_STABILIZE] %.1fs 경과 → RECOVERY_UP", time_slide_right_s_);
+            "[CLEAN_STABILIZE] 슬라이드 도달 → RECOVERY_UP");
+          transition(State::RECOVERY_UP, now);
+        } else if (elapsed(now) > 3.0) {
+          RCLCPP_WARN(get_logger(),
+            "[CLEAN_STABILIZE] 슬라이드 타임아웃 → RECOVERY_UP");
           transition(State::RECOVERY_UP, now);
         }
         break;
@@ -973,9 +975,8 @@ class ScarStateManager : public rclcpp::Node {
        * ────────────────────────────────────────────────────────── */
       case State::RETURN_LEFT_RUN: {
         pack_wheel(cmd, ik_crab(spd_return_));  // 좌측 이동
-        if (elapsed(now) > time_return_left_s_) {
-          RCLCPP_INFO(get_logger(),
-            "[RETURN_LEFT] %.1fs 경과 → RETURN_STABILIZE", time_return_left_s_);
+        if (s.ultrasonic_left < US_WALL_DIST || elapsed(now) > 8.0) {
+          RCLCPP_INFO(get_logger(), "[RETURN_LEFT] 완료 → RETURN_STABILIZE");
           transition(State::RETURN_STABILIZE, now);
         }
         break;
@@ -997,9 +998,13 @@ class ScarStateManager : public rclcpp::Node {
         }
         apply_slide(cmd, SlideDir::LEFT);
 
-        if (elapsed(now) > time_slide_left_s_) {
+        if (slide_reached(s, SlideDir::LEFT)) {
           RCLCPP_INFO(get_logger(),
-            "[RETURN_STABILIZE] %.1fs 경과 → STEER_RESET", time_slide_left_s_);
+            "[RETURN_STABILIZE] 슬라이드 도달 → STEER_RESET");
+          transition(State::STEER_RESET, now);
+        } else if (elapsed(now) > 3.0) {
+          RCLCPP_WARN(get_logger(),
+            "[RETURN_STABILIZE] 타임아웃 → STEER_RESET");
           transition(State::STEER_RESET, now);
         }
         break;
