@@ -110,6 +110,13 @@ constexpr int32_t SLIDE_TOL = 30;
 // person_node의 resume_wait_sec 과 별개로 Xavier 측에서 추가 확인
 constexpr double HUMAN_RESUME_CONFIRM = 1.0;
 
+// 조향 타이밍 / 허용 오차 (테스트 검증값)
+constexpr double  STEER_SETTLE_S  = 1.0;   // 등반 후 정착 대기
+constexpr double  STEER_TIMEOUT_S = 12.0;  // 조향 타임아웃 (유성 기어 8:1, 720° 이동)
+constexpr double  STEER_HOLD_S    = 2.0;   // 목표 도달 후 유지
+constexpr int32_t STEER_TOL_PULSE = 30;    // 도달 판정 허용 오차 (pulse)
+constexpr int32_t STEER_GEAR_RATIO = 8;    // 유성 기어비
+
 /* ================================================================
  *  [2] 열거형
  * ================================================================ */
@@ -362,6 +369,16 @@ class ScarStateManager : public rclcpp::Node {
 
   double stabilized_pitch_ = 0.0;
 
+  // 조향 동적 목표 + 도달 판정
+  bool          steer_cmd_sent_   = false;
+  rclcpp::Time  steer_reached_t_{0, 0, RCL_ROS_TIME};
+  int32_t       target_steer_f_   = 0;
+  int32_t       target_steer_r_   = 0;
+  bool          steer_retried_    = false;
+
+  // 2계단 카운터 (데모: 2번째 계단 오른 후에만 청소)
+  int           stairs_climbed_   = 0;
+
   PID pid_cp_{6.0, 0.2, 0.8, 50.0};   // Crab Pitch PID
   PID pid_cy_{4.5, 0.15, 0.5, 50.0};  // Crab Yaw PID
 
@@ -419,9 +436,9 @@ class ScarStateManager : public rclcpp::Node {
     wc.vRR = to_dxl(wheel_rps(rr_vx, rr_vy, theta_r));
 
     wc.steer_f = zero_f_ + STEER_SIGN *
-        static_cast<int32_t>(theta_f * PULSE_PER_REV / (2.0 * M_PI));
+        static_cast<int32_t>(theta_f * PULSE_PER_REV * STEER_GEAR_RATIO / (2.0 * M_PI));
     wc.steer_r = zero_r_ + STEER_SIGN *
-        static_cast<int32_t>(theta_r * PULSE_PER_REV / (2.0 * M_PI));
+        static_cast<int32_t>(theta_r * PULSE_PER_REV * STEER_GEAR_RATIO / (2.0 * M_PI));
     return wc;
   }
 
@@ -434,9 +451,9 @@ class ScarStateManager : public rclcpp::Node {
   WheelCmds ik_steer_only(double theta_f_rad, double theta_r_rad) const {
     WheelCmds wc;
     wc.steer_f = zero_f_ + STEER_SIGN *
-        static_cast<int32_t>(theta_f_rad * PULSE_PER_REV / (2.0 * M_PI));
+        static_cast<int32_t>(theta_f_rad * PULSE_PER_REV * STEER_GEAR_RATIO / (2.0 * M_PI));
     wc.steer_r = zero_r_ + STEER_SIGN *
-        static_cast<int32_t>(theta_r_rad * PULSE_PER_REV / (2.0 * M_PI));
+        static_cast<int32_t>(theta_r_rad * PULSE_PER_REV * STEER_GEAR_RATIO / (2.0 * M_PI));
     return wc;
   }
 
@@ -493,7 +510,10 @@ class ScarStateManager : public rclcpp::Node {
     fl_climbed_     = fr_climbed_ = rl_climbed_ = rr_climbed_ = false;
     act1_grounded_ = act2_grounded_ = false;
     both_grounded_t_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
-    slide_cmd_sent_ = false;
+    slide_cmd_sent_  = false;
+    steer_cmd_sent_  = false;
+    steer_retried_   = false;
+    steer_reached_t_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
     pid_cp_.reset(); pid_cy_.reset();
   }
 
@@ -544,6 +564,7 @@ class ScarStateManager : public rclcpp::Node {
     if (ev_idle_.exchange(false)) {
       estop_active_.store(false);
       pre_pause_state_ = State::IDLE;
+      stairs_climbed_  = 0;
       transition(State::IDLE, now);
     }
   }
@@ -811,11 +832,20 @@ class ScarStateManager : public rclcpp::Node {
       case State::POLE_Y_ALIGN: {
         pack_wheel(cmd, ik_crab(-spd_align_));  // 우측 이동
         if (elapsed(now) > time_pole_align_s_) {
-          stabilized_pitch_ = s.pitch_angle;
-          RCLCPP_INFO(get_logger(),
-            "[POLE_Y_ALIGN] %.1fs 경과 → TILTED_CLEAN_INIT (pitch_ref=%.2f°)",
-            time_pole_align_s_, stabilized_pitch_);
-          transition(State::TILTED_CLEAN_INIT, now);
+          stairs_climbed_++;
+          if (stairs_climbed_ < 2) {
+            RCLCPP_INFO(get_logger(),
+              "[POLE_Y_ALIGN] %d번째 계단 완료 → STAIR_APPROACH (2번째 대기)",
+              stairs_climbed_);
+            transition(State::STAIR_APPROACH, now);
+          } else {
+            stairs_climbed_ = 0;
+            stabilized_pitch_ = s.pitch_angle;
+            RCLCPP_INFO(get_logger(),
+              "[POLE_Y_ALIGN] 2번째 계단 완료 → TILTED_CLEAN_INIT (pitch_ref=%.2f°)",
+              stabilized_pitch_);
+            transition(State::TILTED_CLEAN_INIT, now);
+          }
         }
         break;
       }
@@ -824,12 +854,47 @@ class ScarStateManager : public rclcpp::Node {
        *  TILTED_CLEAN_INIT: 조향 −90° (우측 크랩) + 2.5초 대기
        * ────────────────────────────────────────────────────────── */
       case State::TILTED_CLEAN_INIT: {
-        auto ws = ik_steer_only(-M_PI / 2.0, -M_PI / 2.0);
-        cmd.target_steer_pos_l = ws.steer_f;
-        cmd.target_steer_pos_r = ws.steer_r;
-        if (elapsed(now) > 2.5) {
-          RCLCPP_INFO(get_logger(), "[TILTED_CLEAN_INIT] → CLEANING_DOWN");
+        // 1) 정착 대기
+        if (elapsed(now) < STEER_SETTLE_S) break;
+
+        // 2) 첫 진입 시 현재 위치 기준으로 목표 계산 (dynamic)
+        if (!steer_cmd_sent_) {
+          int32_t p0 = s.steer_pos_l;
+          int32_t p1 = s.steer_pos_r;
+          target_steer_f_ = p0 - 8192;
+          target_steer_r_ = p1 - 8192;
+          steer_cmd_sent_ = true;
+          RCLCPP_INFO(get_logger(),
+            "[TILTED_CLEAN_INIT] steer goal: f=%d r=%d",
+            target_steer_f_, target_steer_r_);
+        }
+
+        cmd.target_steer_pos_l = target_steer_f_;
+        cmd.target_steer_pos_r = target_steer_r_;
+
+        // 3) 위치 기반 도달 판정
+        bool reached = (std::abs(s.steer_pos_l - target_steer_f_) <= STEER_TOL_PULSE &&
+                        std::abs(s.steer_pos_r - target_steer_r_) <= STEER_TOL_PULSE);
+        if (reached && steer_reached_t_.nanoseconds() == 0)
+          steer_reached_t_ = now;
+
+        if (steer_reached_t_.nanoseconds() > 0 &&
+            (now - steer_reached_t_).seconds() >= STEER_HOLD_S) {
+          RCLCPP_INFO(get_logger(), "[TILTED_CLEAN_INIT] 도달 확인 → CLEANING_DOWN");
           transition(State::CLEANING_DOWN, now);
+        } else if (elapsed(now) >= STEER_SETTLE_S + STEER_TIMEOUT_S) {
+          if (!steer_retried_) {
+            RCLCPP_WARN(get_logger(),
+              "[TILTED_CLEAN_INIT] 타임아웃, 재시도: cur f=%d r=%d → target f=%d r=%d",
+              s.steer_pos_l, s.steer_pos_r, target_steer_f_, target_steer_r_);
+            steer_retried_   = true;
+            steer_reached_t_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+            entry_t_         = now;
+          } else {
+            RCLCPP_WARN(get_logger(),
+              "[TILTED_CLEAN_INIT] 재시도 후 타임아웃 → CLEANING_DOWN");
+            transition(State::CLEANING_DOWN, now);
+          }
         }
         break;
       }
@@ -1011,8 +1076,18 @@ class ScarStateManager : public rclcpp::Node {
       case State::STEER_RESET: {
         pack_wheel(cmd, ik_straight(0.0));
         apply_slide(cmd, SlideDir::CENTER);
-        if (elapsed(now) > 2.5) {
-          RCLCPP_INFO(get_logger(), "[STEER_RESET] → STEER_STABILIZE");
+
+        bool reached = (std::abs(s.steer_pos_l - zero_f_) <= STEER_TOL_PULSE &&
+                        std::abs(s.steer_pos_r - zero_r_) <= STEER_TOL_PULSE);
+        if (reached && steer_reached_t_.nanoseconds() == 0)
+          steer_reached_t_ = now;
+
+        if (steer_reached_t_.nanoseconds() > 0 &&
+            (now - steer_reached_t_).seconds() >= STEER_HOLD_S) {
+          RCLCPP_INFO(get_logger(), "[STEER_RESET] 도달 → STEER_STABILIZE");
+          transition(State::STEER_STABILIZE, now);
+        } else if (elapsed(now) > STEER_TIMEOUT_S) {
+          RCLCPP_WARN(get_logger(), "[STEER_RESET] 타임아웃 → STEER_STABILIZE");
           transition(State::STEER_STABILIZE, now);
         }
         break;
