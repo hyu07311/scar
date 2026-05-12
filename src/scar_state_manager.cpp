@@ -475,9 +475,9 @@ class ScarStateManager : public rclcpp::Node {
   // RIGHT: -slide_vel_ (우측), LEFT: +slide_vel_ (좌측), CENTER: 정지
   void apply_slide(ScarCmd& cmd, SlideDir dir) {
     switch (dir) {
-      case SlideDir::CENTER: cmd.target_slide_vel =  0;            break;
-      case SlideDir::RIGHT:  cmd.target_slide_vel = -slide_vel_;   break;
-      case SlideDir::LEFT:   cmd.target_slide_vel = +slide_vel_;   break;
+      case SlideDir::CENTER: cmd.target_slide_pos =  0;            break;
+      case SlideDir::RIGHT:  cmd.target_slide_pos = -slide_vel_;   break;
+      case SlideDir::LEFT:   cmd.target_slide_pos = +slide_vel_;   break;
     }
     slide_dir_ = dir;
   }
@@ -595,7 +595,7 @@ class ScarStateManager : public rclcpp::Node {
     cmd.target_actuator_2  = kact2;
     cmd.target_brush_speed = kbrush;
     cmd.target_suction_pwm = ksuction;
-    cmd.target_slide_vel   = kslide;
+    cmd.target_slide_pos   = kslide;
     cmd_pub_->publish(cmd);
   }
 
