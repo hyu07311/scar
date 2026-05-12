@@ -225,9 +225,9 @@ class ScarStateManager : public rclcpp::Node {
     lc_kg_        = declare_parameter("lc_contact_kg",       1.0);
     vision_tol_   = declare_parameter("vision_align_tol",    0.05);
 
-    // 슬라이드 밀착량 (기구 실측 후 수정)
-    slide_r_delta_ = (int32_t)declare_parameter("slide_right_delta", 500);
-    slide_l_delta_ = (int32_t)declare_parameter("slide_left_delta",  500);
+    // 슬라이드 (ID 18, Velocity Mode): -285 = 우측, +285 = 좌측
+    slide_vel_   = (int32_t)declare_parameter("slide_velocity",  285);
+    slide_run_s_ = declare_parameter("slide_run_s", 20.0);
 
     // 인체 감지 임계 거리 (person_node에서 Bool로 변환되어 오지만 예비)
     human_stop_dist_ = declare_parameter("human_stop_distance", 3.0);
@@ -236,8 +236,6 @@ class ScarStateManager : public rclcpp::Node {
     time_pole_align_s_  = declare_parameter("time_pole_align_s",  3.0);
     time_crab_clean_s_  = declare_parameter("time_crab_clean_s",  3.0);
     time_return_left_s_ = declare_parameter("time_return_left_s", 3.0);
-    time_slide_right_s_ = declare_parameter("time_slide_right_s", 1.5);
-    time_slide_left_s_  = declare_parameter("time_slide_left_s",  1.5);
 
     /* ── [5.2] ROS 인터페이스 ────────────────────────────────── */
     cmd_pub_ = create_publisher<ScarCmd>("/scar_cmd", 10);
@@ -337,17 +335,16 @@ class ScarStateManager : public rclcpp::Node {
   double  spd_crab_, spd_align_, spd_return_, spd_slow_;
   int16_t load_contact_, load_stable_, load_diff_, load_emg_;
   double  lc_kg_, vision_tol_, human_stop_dist_;
-  int32_t slide_r_delta_, slide_l_delta_;
+  int32_t slide_vel_;
+  double  slide_run_s_;
   double  time_pole_align_s_, time_crab_clean_s_, time_return_left_s_;
-  double  time_slide_right_s_, time_slide_left_s_;
 
   /* ── 조향 zero 기준 ──────────────────────────────────────────── */
   bool    steer_zeroed_ = false;
   int32_t zero_f_ = 2048;
   int32_t zero_r_ = 2048;
 
-  /* ── 슬라이드 (ID 23, Extended Position) ─────────────────────── */
-  int32_t  slide_zero_     = 0;
+  /* ── 슬라이드 (ID 18, Velocity Mode) ────────────────────────── */
   SlideDir slide_dir_      = SlideDir::CENTER;
   bool     slide_cmd_sent_ = false;
 
@@ -474,21 +471,15 @@ class ScarStateManager : public rclcpp::Node {
     cmd.target_steer_pos_r = wc.steer_r;
   }
 
-  /* ── 슬라이드 헬퍼 ──────────────────────────────────────────── */
+  /* ── 슬라이드 헬퍼 (ID 18, Velocity Mode) ───────────────────── */
+  // RIGHT: -slide_vel_ (우측), LEFT: +slide_vel_ (좌측), CENTER: 정지
   void apply_slide(ScarCmd& cmd, SlideDir dir) {
     switch (dir) {
-      case SlideDir::CENTER: cmd.target_slide_pos = slide_zero_;                    break;
-      case SlideDir::RIGHT:  cmd.target_slide_pos = slide_zero_ + slide_r_delta_;  break;
-      case SlideDir::LEFT:   cmd.target_slide_pos = slide_zero_ - slide_l_delta_;  break;
+      case SlideDir::CENTER: cmd.target_slide_vel =  0;            break;
+      case SlideDir::RIGHT:  cmd.target_slide_vel = -slide_vel_;   break;
+      case SlideDir::LEFT:   cmd.target_slide_vel = +slide_vel_;   break;
     }
     slide_dir_ = dir;
-  }
-
-  bool slide_reached(const ScarStatus& s, SlideDir dir) const {
-    int32_t target = slide_zero_;
-    if (dir == SlideDir::RIGHT) target += slide_r_delta_;
-    if (dir == SlideDir::LEFT)  target -= slide_l_delta_;
-    return std::abs(s.slide_pos - target) < SLIDE_TOL;
   }
 
   /* ── 안전 체크 ──────────────────────────────────────────────── */
@@ -604,7 +595,7 @@ class ScarStateManager : public rclcpp::Node {
     cmd.target_actuator_2  = kact2;
     cmd.target_brush_speed = kbrush;
     cmd.target_suction_pwm = ksuction;
-    cmd.target_slide_pos   = kslide;
+    cmd.target_slide_vel   = kslide;
     cmd_pub_->publish(cmd);
   }
 
@@ -992,15 +983,17 @@ class ScarStateManager : public rclcpp::Node {
 
         if (!slide_cmd_sent_) {
           RCLCPP_INFO(get_logger(),
-            "[CLEAN_STABILIZE] 슬라이드 우측 밀착 명령 (delta=%d pulse)",
-            slide_r_delta_);
+            "[CLEAN_STABILIZE] 슬라이드 우측 밀착 시작 (vel=%d, %.1fs)",
+            -slide_vel_, slide_run_s_);
           slide_cmd_sent_ = true;
         }
-        apply_slide(cmd, SlideDir::RIGHT);
 
-        if (elapsed(now) > time_slide_right_s_) {
+        if (elapsed(now) < slide_run_s_) {
+          apply_slide(cmd, SlideDir::RIGHT);  // vel = -slide_vel_
+        } else {
+          apply_slide(cmd, SlideDir::CENTER); // 정지
           RCLCPP_INFO(get_logger(),
-            "[CLEAN_STABILIZE] %.1fs 경과 → RECOVERY_UP", time_slide_right_s_);
+            "[CLEAN_STABILIZE] 슬라이드 우측 밀착 완료 → RECOVERY_UP");
           transition(State::RECOVERY_UP, now);
         }
         break;
@@ -1056,15 +1049,17 @@ class ScarStateManager : public rclcpp::Node {
 
         if (!slide_cmd_sent_) {
           RCLCPP_INFO(get_logger(),
-            "[RETURN_STABILIZE] 슬라이드 좌측 밀착 명령 (delta=%d pulse)",
-            slide_l_delta_);
+            "[RETURN_STABILIZE] 슬라이드 좌측 밀착 시작 (vel=+%d, %.1fs)",
+            slide_vel_, slide_run_s_);
           slide_cmd_sent_ = true;
         }
-        apply_slide(cmd, SlideDir::LEFT);
 
-        if (elapsed(now) > time_slide_left_s_) {
+        if (elapsed(now) < slide_run_s_) {
+          apply_slide(cmd, SlideDir::LEFT);   // vel = +slide_vel_
+        } else {
+          apply_slide(cmd, SlideDir::CENTER); // 정지
           RCLCPP_INFO(get_logger(),
-            "[RETURN_STABILIZE] %.1fs 경과 → STEER_RESET", time_slide_left_s_);
+            "[RETURN_STABILIZE] 슬라이드 좌측 밀착 완료 → STEER_RESET");
           transition(State::STEER_RESET, now);
         }
         break;
@@ -1226,11 +1221,14 @@ class ScarStateManager : public rclcpp::Node {
         kact1_ = kact2_ = 0;
         RCLCPP_INFO(get_logger(), "[ACT] 정지"); break;
       case '[':
-        kslide_ -= 50;
-        RCLCPP_INFO(get_logger(), "[SLIDE] %d", kslide_); break;
+        kslide_ = -slide_vel_;  // 우측 이동
+        RCLCPP_INFO(get_logger(), "[SLIDE] 우측 vel=%d", kslide_); break;
       case ']':
-        kslide_ += 50;
-        RCLCPP_INFO(get_logger(), "[SLIDE] %d", kslide_); break;
+        kslide_ = +slide_vel_;  // 좌측 이동
+        RCLCPP_INFO(get_logger(), "[SLIDE] 좌측 vel=%d", kslide_); break;
+      case '\\':
+        kslide_ = 0;
+        RCLCPP_INFO(get_logger(), "[SLIDE] 정지"); break;
       case 'b': case 'B':
         kbrush_ = kbrush_ ? 0 : BRUSH_SPEED;
         RCLCPP_INFO(get_logger(), "[BRUSH] %s", kbrush_ ? "ON" : "OFF"); break;
@@ -1255,7 +1253,9 @@ class ScarStateManager : public rclcpp::Node {
 ║  [청소 모듈]                                                  ║
 ║   I / K    : 리니어 상승 / 하강                               ║
 ║   O        : 리니어 정지                                      ║
-║   [ / ]    : 슬라이드 -50 / +50 pulse                        ║
+║   [        : 슬라이드 우측 (vel=-285)                         ║
+║   ]        : 슬라이드 좌측 (vel=+285)                         ║
+║   \        : 슬라이드 정지                                    ║
 ║   B        : 브러시 ON / OFF                                  ║
 ║   F        : 흡입 팬 ON / OFF                                 ║
 ║  [시스템]                                                     ║
