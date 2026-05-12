@@ -49,7 +49,7 @@
 const uint8_t DRIVE_IDS[] = {1, 3, 5, 7};  // MX-106 FL/FR/RL/RR
 const uint8_t STEER_IDS[] = {12, 13};       // MX-64  전륜/후륜
 const uint8_t BRUSH_IDS[] = {37, 38};       // XL430  브러시 좌/우
-const uint8_t SLIDE_ID    = 23;             // MX-64  슬라이드 (속도 제어)
+const uint8_t SLIDE_ID    = 18;             // MX-64  슬라이드 (속도 제어)
 
 /* ================================================================
  *  [3] 핀 정의
