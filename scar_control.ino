@@ -293,7 +293,7 @@ void cmd_callback(const void *msgin) {
   // 4. 청소 브러시 + 흡입팬 명령
   setCleaningSync(msg->target_brush_speed, msg->target_suction_pwm);
 
-  // 5. 슬라이드 명령 (데모: 속도 제어 — target_slide_pos를 velocity로 사용)
+  // 5. 슬라이드 명령 (속도 제어)
   packetHandler->write4ByteTxRx(
       portHandler, SLIDE_ID,
       ADDR_GOAL_VELOCITY, (uint32_t)msg->target_slide_pos, NULL);
@@ -401,7 +401,7 @@ void setup() {
 
   // ── 모터 모드 초기화 ────────────────────────────────────────
   initDXL_Robust(DRIVE_IDS, 4, 1);   // MX-106: 속도 제어
-  initDXL_Robust(STEER_IDS, 2, 3);   // MX-64:  위치 제어
+  initDXL_Robust(STEER_IDS, 2, 4);   // MX-64:  확장 위치 제어 (기어비 8:1, 다회전)
 
   for (uint8_t id : STEER_IDS) {
     packetHandler->write4ByteTxRx(
@@ -411,7 +411,7 @@ void setup() {
 
   initDXL_Robust(BRUSH_IDS, 2, 1);   // XL430: 속도 제어
 
-  // 슬라이드(ID 23): 데모용 속도 제어 모드 (Mode 1)
+  // 슬라이드(ID 18): 속도 제어 모드 (Mode 1)
   uint8_t slide_arr[1] = {SLIDE_ID};
   initDXL_Robust(slide_arr, 1, 1);
 
