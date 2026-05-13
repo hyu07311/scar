@@ -605,10 +605,13 @@ class ScarStateManager : public rclcpp::Node {
    * ================================================================ */
   void tick_auto(const ScarStatus& s, const rclcpp::Time& now, double dt) {
 
-    // ── [안전 1] 전복/과부하 → EMERGENCY_STOP ──────────────────
+    // ── [안전 1] 전복/과부하/스페이스바 → EMERGENCY_STOP ─────────
     if (state_ != State::EMERGENCY_STOP &&
         state_ != State::HUMAN_PAUSE) {
-      if (is_tilting(s)) {
+      if (estop_active_.load()) {
+        RCLCPP_WARN(get_logger(), "[SAFETY] 비상 정지 (스페이스바)");
+        transition(State::EMERGENCY_STOP, now);
+      } else if (is_tilting(s)) {
         RCLCPP_ERROR(get_logger(), "[SAFETY] 전복! pitch=%.1f°", s.pitch_angle);
         transition(State::EMERGENCY_STOP, now);
       } else if (motor_overloaded(s)) {
