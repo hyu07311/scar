@@ -462,11 +462,12 @@ class ScarStateManager : public rclcpp::Node {
   }
 
   /* ── WheelCmds → ScarCmd 패킹 ──────────────────────────────── */
+  // FL/FR 모터는 물리적으로 반대 방향 장착 (sketch_apr27b DIR_MULT {-1,-1,1,1} 동일)
   void pack_wheel(ScarCmd& cmd, const WheelCmds& wc) const {
-    cmd.target_vel_fl      = wc.vFL;
-    cmd.target_vel_fr      = wc.vFR;
-    cmd.target_vel_rl      = wc.vRL;
-    cmd.target_vel_rr      = wc.vRR;
+    cmd.target_vel_fl      = -wc.vFL;
+    cmd.target_vel_fr      = -wc.vFR;
+    cmd.target_vel_rl      =  wc.vRL;
+    cmd.target_vel_rr      =  wc.vRR;
     cmd.target_steer_pos_l = wc.steer_f;
     cmd.target_steer_pos_r = wc.steer_r;
   }
@@ -735,25 +736,25 @@ class ScarStateManager : public rclcpp::Node {
           } else {
             bool fl_heavy = (s.load_fl > s.load_fr);
             int32_t lo = mps_to_dxl(0.05), hi = mps_to_dxl(spd_approach_);
-            cmd.target_vel_fl = fl_heavy ? lo : hi;
-            cmd.target_vel_fr = fl_heavy ? hi : lo;
-            cmd.target_vel_rl = cmd.target_vel_fl;
-            cmd.target_vel_rr = cmd.target_vel_fr;
+            cmd.target_vel_fl = -(fl_heavy ? lo : hi);
+            cmd.target_vel_fr = -(fl_heavy ? hi : lo);
+            cmd.target_vel_rl =   fl_heavy ? lo : hi;
+            cmd.target_vel_rr =   fl_heavy ? hi : lo;
             auto ws = ik_steer_only(0.0, 0.0);
             cmd.target_steer_pos_l = ws.steer_f;
             cmd.target_steer_pos_r = ws.steer_r;
           }
         } else if (Lhit) {
           cmd.target_vel_fl = 0; cmd.target_vel_rl = 0;
-          cmd.target_vel_fr = mps_to_dxl(0.12);
-          cmd.target_vel_rr = mps_to_dxl(0.12);
+          cmd.target_vel_fr = -mps_to_dxl(0.12);
+          cmd.target_vel_rr =  mps_to_dxl(0.12);
           auto ws = ik_steer_only(0.0, 0.0);
           cmd.target_steer_pos_l = ws.steer_f;
           cmd.target_steer_pos_r = ws.steer_r;
         } else if (Rhit) {
           cmd.target_vel_fr = 0; cmd.target_vel_rr = 0;
-          cmd.target_vel_fl = mps_to_dxl(0.12);
-          cmd.target_vel_rl = mps_to_dxl(0.12);
+          cmd.target_vel_fl = -mps_to_dxl(0.12);
+          cmd.target_vel_rl =  mps_to_dxl(0.12);
           auto ws = ik_steer_only(0.0, 0.0);
           cmd.target_steer_pos_l = ws.steer_f;
           cmd.target_steer_pos_r = ws.steer_r;
@@ -783,8 +784,8 @@ class ScarStateManager : public rclcpp::Node {
         int32_t slow = mps_to_dxl(spd_slow_);
         int32_t rear = mps_to_dxl(spd_climb_f_);
 
-        cmd.target_vel_fl = fl_climbed_ ? slow : full;
-        cmd.target_vel_fr = fr_climbed_ ? slow : full;
+        cmd.target_vel_fl = -(fl_climbed_ ? slow : full);
+        cmd.target_vel_fr = -(fr_climbed_ ? slow : full);
         cmd.target_vel_rl = rear;
         cmd.target_vel_rr = rear;
 
@@ -1103,8 +1104,8 @@ class ScarStateManager : public rclcpp::Node {
         int32_t full = mps_to_dxl(spd_climb_r_);
         int32_t slow = mps_to_dxl(spd_slow_);
 
-        cmd.target_vel_fl = full;
-        cmd.target_vel_fr = full;
+        cmd.target_vel_fl = -full;
+        cmd.target_vel_fr = -full;
         cmd.target_vel_rl = rl_climbed_ ? slow : full;
         cmd.target_vel_rr = rr_climbed_ ? slow : full;
 
