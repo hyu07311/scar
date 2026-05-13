@@ -807,39 +807,29 @@ class ScarStateManager : public rclcpp::Node {
       }
 
       /* ──────────────────────────────────────────────────────────
-       *  FRONT_STABILIZE: 1초 정지
+       *  FRONT_STABILIZE: 1초 정지 후 계단 카운트
        * ────────────────────────────────────────────────────────── */
       case State::FRONT_STABILIZE:
         if (elapsed(now) > 1.0) {
-          RCLCPP_INFO(get_logger(), "[FRONT_STABILIZE] → POLE_Y_ALIGN");
-          transition(State::POLE_Y_ALIGN, now);
-        }
-        break;
-
-      /* ──────────────────────────────────────────────────────────
-       *  POLE_Y_ALIGN: 우측 크랩으로 time_pole_align_s 동안 이동
-       *  (데모: 초음파 대신 시간 기반)
-       * ────────────────────────────────────────────────────────── */
-      case State::POLE_Y_ALIGN: {
-        pack_wheel(cmd, ik_crab(-spd_align_));  // 우측 이동
-        if (elapsed(now) > time_pole_align_s_) {
           stairs_climbed_++;
           if (stairs_climbed_ < 2) {
             RCLCPP_INFO(get_logger(),
-              "[POLE_Y_ALIGN] %d번째 계단 완료 → STAIR_APPROACH (2번째 대기)",
-              stairs_climbed_);
+              "[FRONT_STABILIZE] %d번째 계단 완료 → STAIR_APPROACH", stairs_climbed_);
             transition(State::STAIR_APPROACH, now);
           } else {
             stairs_climbed_ = 0;
             stabilized_pitch_ = s.pitch_angle;
             RCLCPP_INFO(get_logger(),
-              "[POLE_Y_ALIGN] 2번째 계단 완료 → TILTED_CLEAN_INIT (pitch_ref=%.2f°)",
+              "[FRONT_STABILIZE] 2번째 계단 완료 → TILTED_CLEAN_INIT (pitch_ref=%.2f°)",
               stabilized_pitch_);
             transition(State::TILTED_CLEAN_INIT, now);
           }
         }
         break;
-      }
+
+      case State::POLE_Y_ALIGN:
+        transition(State::TILTED_CLEAN_INIT, now);
+        break;
 
       /* ──────────────────────────────────────────────────────────
        *  TILTED_CLEAN_INIT: 조향 −90° (우측 크랩) + 2.5초 대기
