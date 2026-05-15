@@ -117,6 +117,10 @@ constexpr double  STEER_HOLD_S    = 2.0;   // 목표 도달 후 유지
 constexpr int32_t STEER_TOL_PULSE = 30;    // 도달 판정 허용 오차 (pulse)
 constexpr int32_t STEER_GEAR_RATIO = 8;    // 유성 기어비
 
+// 계단 극복 확인 (sketch_apr27b 기반)
+constexpr int     STAIR_CLEAR_COUNT = 10;  // 연속 확인 횟수 (×50ms = 500ms)
+constexpr int32_t BOOST_LOAD        = 500; // 부스트 진입 부하 임계값
+
 /* ================================================================
  *  [2] 열거형
  * ================================================================ */
@@ -209,9 +213,10 @@ class ScarStateManager : public rclcpp::Node {
     half_L_       = declare_parameter("wheel_base_x",        0.30) / 2.0;
     half_W_       = declare_parameter("wheel_track",         0.28) / 2.0;
 
-    spd_approach_ = declare_parameter("speed_approach_mps",  0.06);
-    spd_climb_f_  = declare_parameter("speed_climb_f_mps",   0.23);
-    spd_climb_r_  = declare_parameter("speed_climb_r_mps",   0.23);
+    spd_approach_     = declare_parameter("speed_approach_mps",    0.06);
+    spd_climb_f_      = declare_parameter("speed_climb_f_mps",     0.23);
+    spd_climb_r_      = declare_parameter("speed_climb_r_mps",     0.23);
+    spd_climb_boost_  = declare_parameter("speed_climb_boost_mps", 0.30);
     spd_crab_     = declare_parameter("speed_crab_mps",      0.20);
     spd_align_    = declare_parameter("speed_align_mps",     0.10);
     spd_return_   = declare_parameter("speed_return_mps",    0.20);
@@ -331,7 +336,7 @@ class ScarStateManager : public rclcpp::Node {
 
   /* ── 파라미터 ────────────────────────────────────────────────── */
   double  wheel_radius_, half_L_, half_W_;
-  double  spd_approach_, spd_climb_f_, spd_climb_r_;
+  double  spd_approach_, spd_climb_f_, spd_climb_r_, spd_climb_boost_;
   double  spd_crab_, spd_align_, spd_return_, spd_slow_;
   int16_t load_contact_, load_stable_, load_diff_, load_emg_;
   double  lc_kg_, vision_tol_, human_stop_dist_;
@@ -358,6 +363,9 @@ class ScarStateManager : public rclcpp::Node {
   // PATS Wheel 독립 극복 플래그
   bool fl_climbed_ = false, fr_climbed_ = false;
   bool rl_climbed_ = false, rr_climbed_ = false;
+
+  // 계단 극복 연속 확인 카운터 (sketch_apr27b)
+  int  stair_clear_count_ = 0;
 
   // CLEANING_DOWN 접지 플래그 (transition()에서 리셋)
   bool act1_grounded_ = false;
@@ -499,7 +507,8 @@ class ScarStateManager : public rclcpp::Node {
                 state_str(state_), state_str(next));
     state_          = next;
     entry_t_        = now;
-    fl_climbed_     = fr_climbed_ = rl_climbed_ = rr_climbed_ = false;
+    fl_climbed_        = fr_climbed_ = rl_climbed_ = rr_climbed_ = false;
+    stair_clear_count_ = 0;
     act1_grounded_ = act2_grounded_ = false;
     both_grounded_t_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
     slide_cmd_sent_  = false;
@@ -783,9 +792,12 @@ class ScarStateManager : public rclcpp::Node {
         if (s.load_fl < load_stable_) fl_climbed_ = true;
         if (s.load_fr < load_stable_) fr_climbed_ = true;
 
-        int32_t full = mps_to_dxl(spd_climb_f_);
+        // 부스트: 어느 바퀴라도 BOOST_LOAD 초과 시 속도 증가
+        bool boost = (s.load_fl > BOOST_LOAD || s.load_fr > BOOST_LOAD ||
+                      s.load_rl > BOOST_LOAD || s.load_rr > BOOST_LOAD);
+        int32_t full = mps_to_dxl(boost ? spd_climb_boost_ : spd_climb_f_);
         int32_t slow = mps_to_dxl(spd_slow_);
-        int32_t rear = mps_to_dxl(spd_climb_f_);
+        int32_t rear = full;
 
         cmd.target_vel_fl = -(fl_climbed_ ? slow : full);
         cmd.target_vel_fr = -(fr_climbed_ ? slow : full);
@@ -796,11 +808,22 @@ class ScarStateManager : public rclcpp::Node {
         cmd.target_steer_pos_l = ws.steer_f;
         cmd.target_steer_pos_r = ws.steer_r;
 
-        if (fl_climbed_ && fr_climbed_) {
-          RCLCPP_INFO(get_logger(),
-            "[FRONT_CLIMB] FL/FR 극복 완료 → FRONT_STABILIZE");
-          transition(State::FRONT_STABILIZE, now);
+        // 극복 완료: FL/FR 극복 + 전/후륜 모두 부하 감소 연속 확인
+        // (FRONT_CLIMB 중 후륜은 평지에 있으므로 rl_ever_loaded 조건 불필요)
+        bool all_clear = (s.load_fl < load_stable_ && s.load_fr < load_stable_ &&
+                          s.load_rl < load_stable_ && s.load_rr < load_stable_);
+        if (fl_climbed_ && fr_climbed_ && all_clear) {
+          stair_clear_count_++;
+          if (stair_clear_count_ >= STAIR_CLEAR_COUNT) {
+            RCLCPP_INFO(get_logger(),
+              "[FRONT_CLIMB] FL/FR 극복 완료 (%d회 확인) → FRONT_STABILIZE",
+              STAIR_CLEAR_COUNT);
+            transition(State::FRONT_STABILIZE, now);
+          }
+        } else {
+          stair_clear_count_ = 0;
         }
+
         if (elapsed(now) > 10.0) {
           RCLCPP_WARN(get_logger(),
             "[FRONT_CLIMB] 타임아웃 (FL=%d FR=%d) → FRONT_STABILIZE",
@@ -968,9 +991,6 @@ class ScarStateManager : public rclcpp::Node {
        *  CLEAN_STABILIZE: 청소 기기 정지 + 슬라이드 우측 밀착
        * ────────────────────────────────────────────────────────── */
       case State::CLEAN_STABILIZE: {
-        cmd.target_brush_speed = 0;
-        cmd.target_suction_pwm = SUCTION_OFF;
-
         auto ws = ik_steer_only(-M_PI / 2.0, -M_PI / 2.0);
         cmd.target_steer_pos_l = ws.steer_f;
         cmd.target_steer_pos_r = ws.steer_r;
@@ -984,8 +1004,12 @@ class ScarStateManager : public rclcpp::Node {
 
         if (elapsed(now) < slide_run_s_) {
           apply_slide(cmd, SlideDir::RIGHT);  // vel = -slide_vel_
+          cmd.target_brush_speed = BRUSH_SPEED;
+          cmd.target_suction_pwm = SUCTION_ON;
         } else {
           apply_slide(cmd, SlideDir::CENTER); // 정지
+          cmd.target_brush_speed = 0;
+          cmd.target_suction_pwm = SUCTION_OFF;
           RCLCPP_INFO(get_logger(),
             "[CLEAN_STABILIZE] 슬라이드 우측 밀착 완료 → RECOVERY_UP");
           transition(State::RECOVERY_UP, now);
@@ -1104,7 +1128,10 @@ class ScarStateManager : public rclcpp::Node {
         if (s.load_rl < load_stable_) rl_climbed_ = true;
         if (s.load_rr < load_stable_) rr_climbed_ = true;
 
-        int32_t full = mps_to_dxl(spd_climb_r_);
+        // 부스트: 어느 바퀴라도 BOOST_LOAD 초과 시 속도 증가
+        bool boost = (s.load_fl > BOOST_LOAD || s.load_fr > BOOST_LOAD ||
+                      s.load_rl > BOOST_LOAD || s.load_rr > BOOST_LOAD);
+        int32_t full = mps_to_dxl(boost ? spd_climb_boost_ : spd_climb_r_);
         int32_t slow = mps_to_dxl(spd_slow_);
 
         cmd.target_vel_fl = -full;
@@ -1116,13 +1143,22 @@ class ScarStateManager : public rclcpp::Node {
         cmd.target_steer_pos_l = ws.steer_f;
         cmd.target_steer_pos_r = ws.steer_r;
 
-        if (rl_climbed_ && rr_climbed_) {
-          State next = (s.pitch_angle > PITCH_NEXT_STAIR)
-                       ? State::STAIR_APPROACH : State::IDLE;
-          RCLCPP_INFO(get_logger(),
-            "[REAR_CLIMB] 완료 → %s", state_str(next));
-          transition(next, now);
+        // 극복 완료: 4바퀴 모두 부하 감소 연속 확인
+        bool all_clear = (s.load_fl < load_stable_ && s.load_fr < load_stable_ &&
+                          s.load_rl < load_stable_ && s.load_rr < load_stable_);
+        if (rl_climbed_ && rr_climbed_ && all_clear) {
+          stair_clear_count_++;
+          if (stair_clear_count_ >= STAIR_CLEAR_COUNT) {
+            State next = (s.pitch_angle > PITCH_NEXT_STAIR)
+                         ? State::STAIR_APPROACH : State::IDLE;
+            RCLCPP_INFO(get_logger(),
+              "[REAR_CLIMB] 완료 (%d회 확인) → %s", STAIR_CLEAR_COUNT, state_str(next));
+            transition(next, now);
+          }
+        } else {
+          stair_clear_count_ = 0;
         }
+
         if (elapsed(now) > 10.0) {
           RCLCPP_WARN(get_logger(), "[REAR_CLIMB] 타임아웃");
           State next = (s.pitch_angle > PITCH_NEXT_STAIR)
