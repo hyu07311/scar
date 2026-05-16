@@ -85,8 +85,10 @@ constexpr int16_t SUCTION_ON  = 1600;
 constexpr int16_t SUCTION_OFF = 1000;
 
 // 리니어 액추에이터 PWM (±255)
-constexpr int32_t ACT_DOWN =  200;
-constexpr int32_t ACT_UP   = -200;
+constexpr int32_t ACT_DOWN    =  200;   // M2 하강
+constexpr int32_t ACT_DOWN_M1 =  120;   // M1 하강 (M1이 빠르므로 감속 → 충격 전류 감소)
+constexpr int32_t ACT_UP      = -200;
+constexpr double  ACT_COAST_S =  0.5;   // 접지 후 드라이버 회복 대기 (초)
 
 // 브러시 (DXL velocity unit)
 constexpr int32_t BRUSH_SPEED = 265;
@@ -941,7 +943,10 @@ class ScarStateManager : public rclcpp::Node {
             RCLCPP_INFO(get_logger(), "[CLEANING_DOWN] 양측 접지 완료. 1초 소폭 상승...");
           }
           double rise_elapsed = (now - both_grounded_t_).seconds();
-          if (rise_elapsed < 1.0) {
+          if (rise_elapsed < ACT_COAST_S) {
+            cmd.target_actuator_1 = 0;   // 드라이버 회복 대기
+            cmd.target_actuator_2 = 0;
+          } else if (rise_elapsed < ACT_COAST_S + 1.0) {
             cmd.target_actuator_1 = ACT_UP;
             cmd.target_actuator_2 = ACT_UP;
           } else {
@@ -951,7 +956,7 @@ class ScarStateManager : public rclcpp::Node {
             transition(State::CRAB_WALK_CLEAN, now);
           }
         } else {
-          cmd.target_actuator_1 = act1_grounded_ ? 0 : ACT_DOWN;
+          cmd.target_actuator_1 = act1_grounded_ ? 0 : ACT_DOWN_M1;
           cmd.target_actuator_2 = act2_grounded_ ? 0 : ACT_DOWN;
           if (elapsed(now) > 20.0) {
             RCLCPP_WARN(get_logger(), "[CLEANING_DOWN] 타임아웃 → RECOVERY_UP");
