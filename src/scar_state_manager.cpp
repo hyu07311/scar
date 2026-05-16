@@ -397,7 +397,7 @@ class ScarStateManager : public rclcpp::Node {
   double   kv_ = 0.0;
   double   ks_ = 0.0;
   int32_t  kact1_ = 0, kact2_ = 0;
-  int32_t  kslide_ = 0, kslide_ramp_ = 0, kbrush_ = 0;
+  int32_t  kslide_ = 0, kbrush_ = 0;
   int16_t  ksuction_ = SUCTION_OFF;
 
   std::atomic<bool> estop_active_{false};
@@ -607,17 +607,7 @@ class ScarStateManager : public rclcpp::Node {
     cmd.target_actuator_2  = kact2;
     cmd.target_brush_speed = kbrush;
     cmd.target_suction_pwm = ksuction;
-    {
-      constexpr int32_t STEP = 50;  // 50unit/50ms = 1000unit/s
-      if      (kslide > kslide_ramp_)
-        kslide_ramp_ = (kslide_ramp_ + STEP >= kslide) ? kslide : kslide_ramp_ + STEP;
-      else if (kslide < kslide_ramp_)
-        kslide_ramp_ = (kslide_ramp_ - STEP <= kslide) ? kslide : kslide_ramp_ - STEP;
-    }
-    cmd.target_slide_pos   = kslide_ramp_;
-    if (kslide_ramp_ != 0)
-      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
-        "[SLIDE] ramp=%d target=%d", kslide_ramp_, kslide);
+    cmd.target_slide_pos   = kslide;
     cmd_pub_->publish(cmd);
   }
 
