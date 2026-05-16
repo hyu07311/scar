@@ -930,26 +930,33 @@ class ScarStateManager : public rclcpp::Node {
           }
         }
 
-        cmd.target_actuator_1 = act1_grounded_ ? 0 : ACT_DOWN;
-        cmd.target_actuator_2 = act2_grounded_ ? 0 : ACT_DOWN;
-
         auto ws = ik_steer_only(-M_PI / 2.0, -M_PI / 2.0);
         cmd.target_steer_pos_l = ws.steer_f;
         cmd.target_steer_pos_r = ws.steer_r;
 
         if (act1_grounded_ && act2_grounded_) {
+          // 양측 접지 완료 → 1초 소폭 상승 후 청소 시작
           if (both_grounded_t_.nanoseconds() == 0) {
             both_grounded_t_ = now;
-            RCLCPP_INFO(get_logger(), "[CLEANING_DOWN] 양측 접지 완료. 3초 대기...");
-          } else if ((now - both_grounded_t_).seconds() >= 3.0) {
-            RCLCPP_INFO(get_logger(),
-              "[CLEANING_DOWN] 3초 경과 → CRAB_WALK_CLEAN (%.2f/%.2f kg)",
-              s.loadcell_l, s.loadcell_r);
+            RCLCPP_INFO(get_logger(), "[CLEANING_DOWN] 양측 접지 완료. 1초 소폭 상승...");
+          }
+          double rise_elapsed = (now - both_grounded_t_).seconds();
+          if (rise_elapsed < 1.0) {
+            cmd.target_actuator_1 = ACT_UP;
+            cmd.target_actuator_2 = ACT_UP;
+          } else {
+            cmd.target_actuator_1 = 0;
+            cmd.target_actuator_2 = 0;
+            RCLCPP_INFO(get_logger(), "[CLEANING_DOWN] 소폭 상승 완료 → CRAB_WALK_CLEAN");
             transition(State::CRAB_WALK_CLEAN, now);
           }
-        } else if (elapsed(now) > 12.0) {
-          RCLCPP_WARN(get_logger(), "[CLEANING_DOWN] 타임아웃 → RECOVERY_UP");
-          transition(State::RECOVERY_UP, now);
+        } else {
+          cmd.target_actuator_1 = act1_grounded_ ? 0 : ACT_DOWN;
+          cmd.target_actuator_2 = act2_grounded_ ? 0 : ACT_DOWN;
+          if (elapsed(now) > 20.0) {
+            RCLCPP_WARN(get_logger(), "[CLEANING_DOWN] 타임아웃 → RECOVERY_UP");
+            transition(State::RECOVERY_UP, now);
+          }
         }
         break;
       }
