@@ -412,8 +412,13 @@ void setup() {
   initDXL_Robust(BRUSH_IDS, 2, 1);   // XL430: 속도 제어
 
   // 슬라이드(ID 18): 속도 제어 모드 (Mode 1)
+  // 이전 세션에서 래치된 Hardware Error 클리어 (Wizard가 내부적으로 하는 것과 동일)
   uint8_t slide_arr[1] = {SLIDE_ID};
+  packetHandler->reboot(portHandler, SLIDE_ID, NULL);
+  delay(500);  // DXL reboot 완료 대기 (~300ms 필요)
   initDXL_Robust(slide_arr, 1, 1);
+  // Profile Acceleration: 0=즉시가속(Electrical Shock 유발), 50=완만한 램프(~365ms)
+  packetHandler->write4ByteTxRx(portHandler, SLIDE_ID, 108, 50, NULL);
 
   // ── GroupSyncRead 설정 (조향 위치 피드백) ───────────────────
   groupSyncRead_steer = new dynamixel::GroupSyncRead(
