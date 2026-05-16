@@ -495,8 +495,7 @@ class ScarStateManager : public rclcpp::Node {
 
   /* ── 안전 체크 ──────────────────────────────────────────────── */
   bool is_tilting(const ScarStatus& s) const {
-    return std::abs(s.pitch_angle) > TILT_EMERGENCY ||
-           std::abs(s.roll_angle)  > TILT_EMERGENCY;
+    return std::abs(s.roll_angle) > TILT_EMERGENCY;
   }
   bool motor_overloaded(const ScarStatus& s) const {
     return s.load_fl > load_emg_ || s.load_fr > load_emg_ ||
@@ -826,12 +825,6 @@ class ScarStateManager : public rclcpp::Node {
           stair_clear_count_ = 0;
         }
 
-        if (elapsed(now) > 10.0) {
-          RCLCPP_WARN(get_logger(),
-            "[FRONT_CLIMB] 타임아웃 (FL=%d FR=%d) → FRONT_STABILIZE",
-            fl_climbed_, fr_climbed_);
-          transition(State::FRONT_STABILIZE, now);
-        }
         break;
       }
 
@@ -892,19 +885,6 @@ class ScarStateManager : public rclcpp::Node {
             (now - steer_reached_t_).seconds() >= STEER_HOLD_S) {
           RCLCPP_INFO(get_logger(), "[TILTED_CLEAN_INIT] 도달 확인 → CLEANING_DOWN");
           transition(State::CLEANING_DOWN, now);
-        } else if (elapsed(now) >= STEER_SETTLE_S + STEER_TIMEOUT_S) {
-          if (!steer_retried_) {
-            RCLCPP_WARN(get_logger(),
-              "[TILTED_CLEAN_INIT] 타임아웃, 재시도: cur f=%d r=%d → target f=%d r=%d",
-              s.steer_pos_l, s.steer_pos_r, target_steer_f_, target_steer_r_);
-            steer_retried_   = true;
-            steer_reached_t_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
-            entry_t_         = now;
-          } else {
-            RCLCPP_WARN(get_logger(),
-              "[TILTED_CLEAN_INIT] 재시도 후 타임아웃 → CLEANING_DOWN");
-            transition(State::CLEANING_DOWN, now);
-          }
         }
         break;
       }
@@ -940,13 +920,13 @@ class ScarStateManager : public rclcpp::Node {
           // 양측 접지 완료 → 1초 소폭 상승 후 청소 시작
           if (both_grounded_t_.nanoseconds() == 0) {
             both_grounded_t_ = now;
-            RCLCPP_INFO(get_logger(), "[CLEANING_DOWN] 양측 접지 완료. 1초 소폭 상승...");
+            RCLCPP_INFO(get_logger(), "[CLEANING_DOWN] 양측 접지 완료. 3초 소폭 상승...");
           }
           double rise_elapsed = (now - both_grounded_t_).seconds();
           if (rise_elapsed < ACT_COAST_S) {
             cmd.target_actuator_1 = 0;   // 드라이버 회복 대기
             cmd.target_actuator_2 = 0;
-          } else if (rise_elapsed < ACT_COAST_S + 1.0) {
+          } else if (rise_elapsed < ACT_COAST_S + 3.0) {
             cmd.target_actuator_1 = ACT_UP;
             cmd.target_actuator_2 = ACT_UP;
           } else {
@@ -958,10 +938,6 @@ class ScarStateManager : public rclcpp::Node {
         } else {
           cmd.target_actuator_1 = act1_grounded_ ? 0 : ACT_DOWN_M1;
           cmd.target_actuator_2 = act2_grounded_ ? 0 : ACT_DOWN;
-          if (elapsed(now) > 20.0) {
-            RCLCPP_WARN(get_logger(), "[CLEANING_DOWN] 타임아웃 → RECOVERY_UP");
-            transition(State::RECOVERY_UP, now);
-          }
         }
         break;
       }
@@ -974,20 +950,7 @@ class ScarStateManager : public rclcpp::Node {
        *  보정: 전/후 축 속도 차이로 pitch/yaw 제어
        * ────────────────────────────────────────────────────────── */
       case State::CRAB_WALK_CLEAN: {
-        double pitch_corr = pid_cp_.update(
-            stabilized_pitch_ - s.pitch_angle, dt);
-        double yaw_corr = pid_cy_.update(-s.yaw_angle, dt);
-
-        WheelCmds wc = ik_crab(-spd_crab_);  // 우측 크랩
-
-        int32_t pc = to_dxl(pitch_corr / wheel_radius_);
-        int32_t yc = to_dxl(yaw_corr   / wheel_radius_);
-        wc.vFL += pc + yc;
-        wc.vFR += pc + yc;
-        wc.vRL -= pc - yc;
-        wc.vRR -= pc - yc;
-
-        pack_wheel(cmd, wc);
+        pack_wheel(cmd, ik_crab(-spd_crab_));  // 우측 크랩 (고정 속도)
         cmd.target_brush_speed = BRUSH_SPEED;
         cmd.target_suction_pwm = SUCTION_ON;
 
@@ -1049,7 +1012,7 @@ class ScarStateManager : public rclcpp::Node {
         if (d1 && d2) {
           RCLCPP_INFO(get_logger(), "[RECOVERY_UP] 복귀 완료 → RETURN_LEFT_RUN");
           transition(State::RETURN_LEFT_RUN, now);
-        } else if (elapsed(now) > 8.0) {
+        } else if (elapsed(now) > 30.0) {
           RCLCPP_WARN(get_logger(), "[RECOVERY_UP] 타임아웃 → RETURN_LEFT_RUN");
           transition(State::RETURN_LEFT_RUN, now);
         }
@@ -1060,7 +1023,15 @@ class ScarStateManager : public rclcpp::Node {
        *  RETURN_LEFT_RUN: 좌측 복귀 주행
        * ────────────────────────────────────────────────────────── */
       case State::RETURN_LEFT_RUN: {
-        pack_wheel(cmd, ik_crab(spd_return_));  // 좌측 이동
+        // 조향은 90° 유지, 바퀴만 역방향으로 좌측 복귀
+        auto ws = ik_steer_only(-M_PI / 2.0, -M_PI / 2.0);
+        cmd.target_steer_pos_l = ws.steer_f;
+        cmd.target_steer_pos_r = ws.steer_r;
+        int32_t v = mps_to_dxl(spd_return_);
+        cmd.target_vel_fl =  v;
+        cmd.target_vel_fr =  v;
+        cmd.target_vel_rl = -v;
+        cmd.target_vel_rr = -v;
         if (elapsed(now) > time_return_left_s_) {
           RCLCPP_INFO(get_logger(),
             "[RETURN_LEFT] %.1fs 경과 → RETURN_STABILIZE", time_return_left_s_);
