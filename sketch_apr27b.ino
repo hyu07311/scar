@@ -87,7 +87,8 @@ bool       rl_ever_loaded     = false;
 bool       rr_ever_loaded     = false;
 bool       steerCmdSent       = false;
 bool       steerRetried       = false;
-int32_t    dynamic_steer90[2] = {0, 0};
+int32_t    dynamic_steer90[2]     = {0, 0};
+int32_t    dynamic_steer_origin[2] = {0, 0};
 uint32_t   steerReachedMs     = 0;
 
 /* ================================================================
@@ -227,6 +228,8 @@ void loop() {
       if (!steerCmdSent && now - stateEntryMs >= STEER_SETTLE_MS) {
         int32_t p0 = getSteerPos(STEER_IDS[0]);
         int32_t p1 = getSteerPos(STEER_IDS[1]);
+        dynamic_steer_origin[0] = p0;
+        dynamic_steer_origin[1] = p1;
         dynamic_steer90[0] = p0 - 8192;
         dynamic_steer90[1] = p1 - 8192;
         setSteerGoal(dynamic_steer90);
@@ -256,26 +259,26 @@ void loop() {
 
     case STATE_STEER_RETURN:
       if (!steerCmdSent) {
-        setSteerGoal(STEER_ZERO);
+        setSteerGoal(dynamic_steer_origin);
         steerCmdSent   = true;
         steerReachedMs = 0;
       }
-      if (steerReached(STEER_ZERO) && steerReachedMs == 0) steerReachedMs = now;
+      if (steerReached(dynamic_steer_origin) && steerReachedMs == 0) steerReachedMs = now;
       if (steerReachedMs != 0 && now - steerReachedMs >= STEER_HOLD_MS) {
         steerCmdSent = false;
         steerRetried = false;
-        state        = STATE_APPROACH;
+        state        = STATE_DONE;
         stateEntryMs = now;
       } else if (now - stateEntryMs >= STEER_TIMEOUT_MS) {
         if (!steerRetried) {
-          setSteerGoal(STEER_ZERO);
+          setSteerGoal(dynamic_steer_origin);
           steerRetried   = true;
           steerReachedMs = 0;
           stateEntryMs   = now;
         } else {
           steerCmdSent = false;
           steerRetried = false;
-          state        = STATE_APPROACH;
+          state        = STATE_DONE;
           stateEntryMs = now;
         }
       }
