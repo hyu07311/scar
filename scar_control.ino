@@ -99,6 +99,7 @@ int32_t current_act2_pwm   = 0;
 float   est_dist1           = 0.0f;
 float   est_dist2           = 0.0f;
 
+
 /* ================================================================
  *  [5] micro-ROS 객체
  * ================================================================ */
@@ -176,9 +177,9 @@ void forceStopAll() {
       portHandler, SLIDE_ID, ADDR_GOAL_VELOCITY, 0, NULL);
 
   digitalWrite(M1_INA, LOW); digitalWrite(M1_INB, LOW);
-  analogWrite(M1_PWM, 0);
+  analogWrite(M1_PWM, 255);  // brake: 비상 정지 시에도 위치 유지
   digitalWrite(M2_INA, LOW); digitalWrite(M2_INB, LOW);
-  analogWrite(M2_PWM, 0);
+  analogWrite(M2_PWM, 255);  // brake
   current_act1_pwm = 0;
   current_act2_pwm = 0;
 
@@ -191,9 +192,16 @@ void setActuator(int32_t s1, int32_t s2) {
   current_act2_pwm = s2;
 
   auto drive = [](int pA, int pB, int pP, int v) {
-    digitalWrite(pA, v > 0 ? HIGH : LOW);
-    digitalWrite(pB, v < 0 ? HIGH : LOW);
-    analogWrite(pP, (uint8_t)constrain(abs(v), 0, 255));
+    if (v == 0) {
+      // brake 모드: enable HIGH + 양방향 LOW → 모터 단락 제동 (중력 하강 방지)
+      digitalWrite(pA, LOW);
+      digitalWrite(pB, LOW);
+      analogWrite(pP, 255);
+    } else {
+      digitalWrite(pA, v > 0 ? HIGH : LOW);
+      digitalWrite(pB, v < 0 ? HIGH : LOW);
+      analogWrite(pP, (uint8_t)constrain(abs(v), 0, 255));
+    }
   };
   drive(M1_INA, M1_INB, M1_PWM, (int)s1);
   drive(M2_INA, M2_INB, M2_PWM, (int)s2);
@@ -293,7 +301,7 @@ void cmd_callback(const void *msgin) {
   // 4. 청소 브러시 + 흡입팬 명령
   setCleaningSync(msg->target_brush_speed, msg->target_suction_pwm);
 
-  // 5. 슬라이드 명령 (속도 제어)
+  // 5. 슬라이드 명령 (DXL Profile Acceleration이 전류 스파이크 제한)
   packetHandler->write4ByteTxRx(
       portHandler, SLIDE_ID,
       ADDR_GOAL_VELOCITY, (uint32_t)msg->target_slide_pos, NULL);
@@ -309,13 +317,18 @@ void timer_callback(rcl_timer_t *timer, int64_t last_call_time) {
   float pitch = IMU.rpy[1] - pitch_offset;
   float yaw   = IMU.rpy[2] - yaw_offset;
 
-  // ── 로드셀 읽기 ─────────────────────────────────────────────
+  // ── 로드셀 읽기 (링 버퍼 이동평균 N=4, fabsf, last-valid) ────
+  static float lc_buf1[4] = {}, lc_buf2[4] = {};
+  static uint8_t lc_idx = 0;
   long r1, r2;
-  float w1 = 0.0f, w2 = 0.0f;
   if (readLoadCell(&r1, &r2)) {
-    w1 = (float)(r1 - tare1) / scale;
-    w2 = (float)(r2 - tare2) / scale;
+    lc_buf1[lc_idx] = fabsf((float)(r1 - tare1) / scale);
+    lc_buf2[lc_idx] = fabsf((float)(r2 - tare2) / scale);
+    lc_idx = (lc_idx + 1) % 4;
   }
+  float w1 = 0.0f, w2 = 0.0f;
+  for (uint8_t i = 0; i < 4; i++) { w1 += lc_buf1[i]; w2 += lc_buf2[i]; }
+  w1 /= 4.0f;  w2 /= 4.0f;
 
   // ── 리니어 액추에이터 거리 추정 ─────────────────────────────
   est_dist1 += (current_act1_pwm / 255.0f) * ACT_MAX_SPEED * 0.01f;
@@ -358,15 +371,19 @@ void timer_callback(rcl_timer_t *timer, int64_t last_call_time) {
  *  [8] 초기화 (setup)
  * ================================================================ */
 void setup() {
+  // M1/M2 핀을 가장 먼저 LOW로 확정 — 부트로더 구간 플로팅으로 H-브리지가
+  // 오동작하는 시간을 최소화하기 위해 set_microros_transports() 이전에 배치
+  pinMode(M1_INA, OUTPUT); digitalWrite(M1_INA, LOW);
+  pinMode(M1_INB, OUTPUT); digitalWrite(M1_INB, LOW);
+  pinMode(M1_PWM, OUTPUT); analogWrite(M1_PWM,  255);  // brake: 리셋 직후부터 위치 유지
+  pinMode(M2_INA, OUTPUT); digitalWrite(M2_INA, LOW);
+  pinMode(M2_INB, OUTPUT); digitalWrite(M2_INB, LOW);
+  pinMode(M2_PWM, OUTPUT); analogWrite(M2_PWM,  255);  // brake
+
   set_microros_transports();
 
   // ── 핀 모드 설정 ────────────────────────────────────────────
   pinMode(LED_PIN, OUTPUT); digitalWrite(LED_PIN, HIGH);
-
-  pinMode(M1_INA, OUTPUT); pinMode(M1_INB, OUTPUT); pinMode(M1_PWM, OUTPUT);
-  pinMode(M2_INA, OUTPUT); pinMode(M2_INB, OUTPUT); pinMode(M2_PWM, OUTPUT);
-  digitalWrite(M1_INA, LOW); digitalWrite(M1_INB, LOW); analogWrite(M1_PWM, 0);
-  digitalWrite(M2_INA, LOW); digitalWrite(M2_INB, LOW); analogWrite(M2_PWM, 0);
 
   pinMode(LC_SCK, OUTPUT);
   pinMode(LC_DT1, INPUT);
@@ -412,13 +429,20 @@ void setup() {
   initDXL_Robust(BRUSH_IDS, 2, 1);   // XL430: 속도 제어
 
   // 슬라이드(ID 18): 속도 제어 모드 (Mode 1)
-  // 이전 세션에서 래치된 Hardware Error 클리어 (Wizard가 내부적으로 하는 것과 동일)
-  uint8_t slide_arr[1] = {SLIDE_ID};
   packetHandler->reboot(portHandler, SLIDE_ID, NULL);
-  delay(500);  // DXL reboot 완료 대기 (~300ms 필요)
-  initDXL_Robust(slide_arr, 1, 1);
-  // Profile Acceleration: 0=즉시가속(Electrical Shock 유발), 50=완만한 램프(~365ms)
-  packetHandler->write4ByteTxRx(portHandler, SLIDE_ID, 108, 50, NULL);
+  delay(2000);
+
+  // Mode=1 쓰기 → 읽어서 확인 → 최대 3회 재시도
+  for (int retry = 0; retry < 3; retry++) {
+    packetHandler->write1ByteTxRx(portHandler, SLIDE_ID, ADDR_TORQUE_ENABLE,  0, NULL); delay(50);
+    packetHandler->write1ByteTxRx(portHandler, SLIDE_ID, ADDR_OPERATING_MODE, 1, NULL); delay(200);
+    uint8_t cur_mode = 0;
+    packetHandler->read1ByteTxRx(portHandler, SLIDE_ID, ADDR_OPERATING_MODE, &cur_mode, NULL);
+    if (cur_mode == 1) break;
+  }
+  // Torque=1은 루프 바깥에서 항상 실행
+  packetHandler->write1ByteTxRx(portHandler, SLIDE_ID, ADDR_TORQUE_ENABLE, 1, NULL); delay(20);
+  packetHandler->write4ByteTxRx(portHandler, SLIDE_ID, 108, 50, NULL);  // PA=50
 
   // ── GroupSyncRead 설정 (조향 위치 피드백) ───────────────────
   groupSyncRead_steer = new dynamixel::GroupSyncRead(
@@ -427,11 +451,18 @@ void setup() {
   for (uint8_t id : STEER_IDS)
     groupSyncRead_steer->addParam(id);
 
-  // ── 로드셀 영점 측정 ────────────────────────────────────────
-  long t1, t2;
-  while (!readLoadCell(&t1, &t2));
-  tare1 = t1;
-  tare2 = t2;
+  // ── 로드셀 영점 측정 (10샘플 평균) ─────────────────────────
+  {
+    long sum1 = 0, sum2 = 0;
+    for (int i = 0; i < 10; i++) {
+      long t1, t2;
+      while (!readLoadCell(&t1, &t2));
+      sum1 += t1;  sum2 += t2;
+      delay(110);
+    }
+    tare1 = sum1 / 10;
+    tare2 = sum2 / 10;
+  }
 
   // ── micro-ROS 초기화 ─────────────────────────────────────────
   allocator = rcl_get_default_allocator();
