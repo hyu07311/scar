@@ -176,10 +176,10 @@ void forceStopAll() {
   packetHandler->write4ByteTxRx(
       portHandler, SLIDE_ID, ADDR_GOAL_VELOCITY, 0, NULL);
 
-  digitalWrite(M1_INA, HIGH); digitalWrite(M1_INB, HIGH);
-  analogWrite(M1_PWM, 255);  // brake: 비상 정지 시에도 위치 유지 (L298N: INA=HIGH,INB=HIGH)
-  digitalWrite(M2_INA, HIGH); digitalWrite(M2_INB, HIGH);
-  analogWrite(M2_PWM, 255);  // brake (L298N: INA=HIGH,INB=HIGH)
+  digitalWrite(M1_INA, LOW); digitalWrite(M1_INB, LOW);
+  analogWrite(M1_PWM, 0);
+  digitalWrite(M2_INA, LOW); digitalWrite(M2_INB, LOW);
+  analogWrite(M2_PWM, 0);
   current_act1_pwm = 0;
   current_act2_pwm = 0;
 
@@ -190,13 +190,12 @@ void forceStopAll() {
 void setActuator(int32_t s1, int32_t s2) {
   current_act1_pwm = s1;
   current_act2_pwm = s2;
-
   auto drive = [](int pA, int pB, int pP, int v) {
     if (v == 0) {
-      // brake 모드: L298N은 IN1=HIGH, IN2=HIGH → 모터 단락 제동 (중력 하강 방지)
-      digitalWrite(pA, HIGH);
-      digitalWrite(pB, HIGH);
-      analogWrite(pP, 255);
+      // 웜기어 특성상 자체 제동이 되므로 전류를 완전히 차단 (LOW, LOW, 0)
+      digitalWrite(pA, LOW);
+      digitalWrite(pB, LOW);
+      analogWrite(pP, 0);
     } else {
       digitalWrite(pA, v > 0 ? HIGH : LOW);
       digitalWrite(pB, v < 0 ? HIGH : LOW);
@@ -371,15 +370,14 @@ void timer_callback(rcl_timer_t *timer, int64_t last_call_time) {
  *  [8] 초기화 (setup)
  * ================================================================ */
 void setup() {
-  // M1/M2 핀을 가장 먼저 LOW로 확정 — 부트로더 구간 플로팅으로 H-브리지가
-  // 오동작하는 시간을 최소화하기 위해 set_microros_transports() 이전에 배치
-  pinMode(M1_INA, OUTPUT); digitalWrite(M1_INA, HIGH);
-  pinMode(M1_INB, OUTPUT); digitalWrite(M1_INB, HIGH);
-  pinMode(M1_PWM, OUTPUT); analogWrite(M1_PWM,  255);  // brake: 리셋 직후부터 위치 유지 (L298N: INA=HIGH,INB=HIGH)
-  pinMode(M2_INA, OUTPUT); digitalWrite(M2_INA, HIGH);
-  pinMode(M2_INB, OUTPUT); digitalWrite(M2_INB, HIGH);
-  pinMode(M2_PWM, OUTPUT); analogWrite(M2_PWM,  255);  // brake (L298N: INA=HIGH,INB=HIGH)
+  // M1/M2 핀을 가장 먼저 LOW로 확정 — 부트로더 구간 플로팅 방지 및 자유 정지 상태로 초기화
+  pinMode(M1_INA, OUTPUT); digitalWrite(M1_INA, LOW);
+  pinMode(M1_INB, OUTPUT); digitalWrite(M1_INB, LOW);
+  pinMode(M1_PWM, OUTPUT); analogWrite(M1_PWM,  0);
 
+  pinMode(M2_INA, OUTPUT); digitalWrite(M2_INA, LOW);
+  pinMode(M2_INB, OUTPUT); digitalWrite(M2_INB, LOW);
+  pinMode(M2_PWM, OUTPUT); analogWrite(M2_PWM,  0);
   set_microros_transports();
 
   // ── 핀 모드 설정 ────────────────────────────────────────────
