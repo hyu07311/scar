@@ -1,0 +1,12 @@
+int8 emergency_stop
+int32 target_vel_fl
+int32 target_vel_fr
+int32 target_vel_rl
+int32 target_vel_rr
+int32 target_steer_pos_l
+int32 target_steer_pos_r
+int32 target_actuator_1
+int32 target_actuator_2
+int32 target_brush_speed
+int16 target_suction_pwm
+int32 target_slide_pos
