@@ -49,8 +49,8 @@
 #define SUCTION_ON       1600   // μs
 #define SUCTION_OFF      1000   // μs
 
-#define LC_THRESHOLD_KG  0.5f  // 필터링 정지: N=4 평균 기준
-#define LC_FAST_KG       1.0f  // 빠른 정지: 단일 원시 읽기 기준 (과하강 방지)
+#define LC_RAW_DELTA   30000L  // 필터링 정지: N=4 평균 기준 (실측 후 조정)
+#define LC_FAST_DELTA  60000L  // 빠른 정지: 단일 원시 읽기 기준 (과하강 방지)
 #define ACT_MAX_SPEED    15.0f  // mm/s (추정)
 #define TARE_SAMPLES     10
 
@@ -67,7 +67,6 @@ dynamixel::PacketHandler *packetHandler;
 Servo suction_esc;
 
 long  tare1 = 0, tare2 = 0;
-const float scale = -58000.0f;
 
 float   est_dist1 = 0.0f, est_dist2 = 0.0f;
 int32_t cur_pwm1  = 0,    cur_pwm2  = 0;
@@ -191,17 +190,19 @@ void setup() {
   }
   tare1 = sum1 / TARE_SAMPLES;
   tare2 = sum2 / TARE_SAMPLES;
-  Serial.println("[TARE] 로드셀 영점 완료");
+  Serial.print("[TARE] 완료 tare1="); Serial.print(tare1);
+  Serial.print(" tare2="); Serial.println(tare2);
 
   delay(STEP_DELAY_MS);
 
   /* ── [DESCENT] 리니어 하강 ─────────────────────────────────── */
   Serial.println("[DESCENT] 하강 시작 — 접지 감지 대기 (최대 50초)");
   {
-    float buf1[4] = {}, buf2[4] = {};
+    long rbuf1[4] = {}, rbuf2[4] = {};
     uint8_t bidx = 0;
-    float raw1 = 0.0f, raw2 = 0.0f;  // 루프 밖 선언: readLoadCell false 시 이전 유효값 유지
+    long rdelta1 = 0, rdelta2 = 0;  // 루프 밖 선언: false 시 마지막 유효 delta 래치
     unsigned long t0 = millis();
+    unsigned long last_print = 0;
     bool landed = false;
 
     while (millis() - t0 < DESCENT_TIMEOUT_MS) {
@@ -209,36 +210,43 @@ void setup() {
 
       long r1, r2;
       if (readLoadCell(&r1, &r2)) {
-        raw1 = fabsf((float)(r1 - tare1) / scale);
-        raw2 = fabsf((float)(r2 - tare2) / scale);
-        buf1[bidx] = raw1;
-        buf2[bidx] = raw2;
+        rdelta1 = abs(r1 - tare1);
+        rdelta2 = abs(r2 - tare2);
+        rbuf1[bidx] = rdelta1;
+        rbuf2[bidx] = rdelta2;
         bidx = (bidx + 1) % 4;
       }
 
-      // 빠른 정지: 단일 원시 읽기 ≥ LC_FAST_KG (HX711 10Hz 과하강 방지)
-      bool fast1 = (raw1 >= LC_FAST_KG);
-      bool fast2 = (raw2 >= LC_FAST_KG);
+      // 빠른 정지: 단일 원시 delta ≥ LC_FAST_DELTA (과하강 방지, 래치 유지)
+      bool fast1 = (rdelta1 >= LC_FAST_DELTA);
+      bool fast2 = (rdelta2 >= LC_FAST_DELTA);
 
-      // 필터링 정지: N=4 이동평균 ≥ LC_THRESHOLD_KG (완만한 접지 포착)
-      float w1 = 0.0f, w2 = 0.0f;
-      for (uint8_t i = 0; i < 4; i++) { w1 += buf1[i]; w2 += buf2[i]; }
-      w1 /= 4.0f; w2 /= 4.0f;
-      bool lc1 = (w1 >= LC_THRESHOLD_KG);
-      bool lc2 = (w2 >= LC_THRESHOLD_KG);
+      // 필터링 정지: N=4 이동평균 ≥ LC_RAW_DELTA (완만한 접지 포착)
+      long avg1 = 0, avg2 = 0;
+      for (uint8_t i = 0; i < 4; i++) { avg1 += rbuf1[i]; avg2 += rbuf2[i]; }
+      avg1 /= 4; avg2 /= 4;
+      bool lc1 = (avg1 >= LC_RAW_DELTA);
+      bool lc2 = (avg2 >= LC_RAW_DELTA);
 
       bool stopped1 = fast1 || lc1;
       bool stopped2 = fast2 || lc2;
       setActuator(stopped1 ? 0 : ACT_DOWN, stopped2 ? 0 : ACT_DOWN);
       updateDist();
 
+      // 500ms마다 delta 출력 (임계값 교정용)
+      if (millis() - last_print >= 500) {
+        Serial.print("[LC] delta1="); Serial.print(rdelta1);
+        Serial.print(" delta2="); Serial.println(rdelta2);
+        last_print = millis();
+      }
+
       if (stopped1 && stopped2) {
         landed = true;
         setActuator(0, 0);
-        Serial.print("[DESCENT] 접지! L="); Serial.print(w1, 2);
-        Serial.print("kg R="); Serial.print(w2, 2);
+        Serial.print("[DESCENT] 접지! delta1="); Serial.print(rdelta1);
+        Serial.print(" delta2="); Serial.print(rdelta2);
         if (fast1 || fast2) Serial.print(" (fast-stop)");
-        Serial.println("kg");
+        Serial.println();
         break;
       }
       delay(DT_MS);
@@ -254,13 +262,15 @@ void setup() {
 
   /* ── [RETRACT] 소폭 재상승 1.5초 ────────────────────────────── */
   Serial.println("[RETRACT] 소폭 재상승 1.5초");
-  setActuator(ACT_UP, ACT_UP);
   {
     unsigned long t0 = millis();
     while (millis() - t0 < RETRACT_MS) {
       checkEmergency();
+      bool d1 = (est_dist1 <= 0.0f);
+      bool d2 = (est_dist2 <= 0.0f);
+      setActuator(d1 ? 0 : ACT_UP, d2 ? 0 : ACT_UP);  // 각 축 독립 정지
       updateDist();
-      if (est_dist1 <= 0.0f && est_dist2 <= 0.0f) break;  // 단거리 하강 시 원점 초과 방지
+      if (d1 && d2) break;
       delay(DT_MS);
     }
   }
