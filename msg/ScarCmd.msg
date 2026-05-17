@@ -10,4 +10,5 @@ int32 target_actuator_2
 int32 target_brush_speed
 int16 target_suction_pwm
 int32 target_slide_pos
+int32 target_slide_vel
 int8 warning_light
