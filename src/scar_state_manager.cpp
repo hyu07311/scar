@@ -229,7 +229,7 @@ class ScarStateManager : public rclcpp::Node {
     load_diff_    = (int16_t)declare_parameter("load_diff_limit",    250);
     load_emg_     = (int16_t)declare_parameter("load_emergency",     900);
 
-    lc_kg_        = declare_parameter("lc_contact_kg",       1.0);
+    lc_kg_        = declare_parameter("lc_contact_kg",       0.5);
     vision_tol_   = declare_parameter("vision_align_tol",    0.05);
 
     // 슬라이드 (ID 18, Velocity Mode): -285 = 우측, +285 = 좌측
@@ -659,6 +659,10 @@ class ScarStateManager : public rclcpp::Node {
           WheelCmds wc = inverse_kinematics(
               cv.linear.x, cv.linear.y, cv.angular.z);
           pack_wheel(cmd, wc);
+        } else {
+          auto ws = ik_steer_only(0.0, 0.0);
+          cmd.target_steer_pos_l = ws.steer_f;
+          cmd.target_steer_pos_r = ws.steer_r;
         }
         break;
       }
@@ -732,45 +736,15 @@ class ScarStateManager : public rclcpp::Node {
        *  STAIR_APPROACH: 계단 접근 + 전륜 좌우 정렬
        * ────────────────────────────────────────────────────────── */
       case State::STAIR_APPROACH: {
-        // 후륜 접촉 → 후륜 등반 즉시 전환
-        if (s.load_rl > load_contact_ || s.load_rr > load_contact_) {
-          RCLCPP_INFO(get_logger(), "[APPROACH] 후륜 접촉 → REAR_CLIMB");
-          transition(State::REAR_CLIMB, now);
-          break;
-        }
 
         bool Lhit = (s.load_fl > load_contact_);
         bool Rhit = (s.load_fr > load_contact_);
 
-        if (Lhit && Rhit) {
-          if (std::abs(s.load_fl - s.load_fr) < load_diff_) {
-            RCLCPP_INFO(get_logger(), "[APPROACH] 전륜 균등 접촉 → FRONT_CLIMB");
-            transition(State::FRONT_CLIMB, now);
-          } else {
-            bool fl_heavy = (s.load_fl > s.load_fr);
-            int32_t lo = mps_to_dxl(0.05), hi = mps_to_dxl(spd_approach_);
-            cmd.target_vel_fl = -(fl_heavy ? lo : hi);
-            cmd.target_vel_fr = -(fl_heavy ? hi : lo);
-            cmd.target_vel_rl =   fl_heavy ? lo : hi;
-            cmd.target_vel_rr =   fl_heavy ? hi : lo;
-            auto ws = ik_steer_only(0.0, 0.0);
-            cmd.target_steer_pos_l = ws.steer_f;
-            cmd.target_steer_pos_r = ws.steer_r;
-          }
-        } else if (Lhit) {
-          cmd.target_vel_fl = 0; cmd.target_vel_rl = 0;
-          cmd.target_vel_fr = -mps_to_dxl(0.12);
-          cmd.target_vel_rr =  mps_to_dxl(0.12);
-          auto ws = ik_steer_only(0.0, 0.0);
-          cmd.target_steer_pos_l = ws.steer_f;
-          cmd.target_steer_pos_r = ws.steer_r;
-        } else if (Rhit) {
-          cmd.target_vel_fr = 0; cmd.target_vel_rr = 0;
-          cmd.target_vel_fl = -mps_to_dxl(0.12);
-          cmd.target_vel_rl =  mps_to_dxl(0.12);
-          auto ws = ik_steer_only(0.0, 0.0);
-          cmd.target_steer_pos_l = ws.steer_f;
-          cmd.target_steer_pos_r = ws.steer_r;
+        // sketch_apr27b 동일: 전륜 어느 한 쪽이라도 접촉하면 즉시 등반 진입 (|| 조건)
+        if (Lhit || Rhit) {
+          RCLCPP_INFO(get_logger(), "[APPROACH] 전륜 접촉 (FL=%d FR=%d) → FRONT_CLIMB",
+                      s.load_fl, s.load_fr);
+          transition(State::FRONT_CLIMB, now);
         } else {
           pack_wheel(cmd, ik_straight(spd_approach_));
         }
@@ -790,41 +764,44 @@ class ScarStateManager : public rclcpp::Node {
        *    RL/RR   → 항상 full (지면 추진)
        * ────────────────────────────────────────────────────────── */
       case State::FRONT_CLIMB: {
-        if (s.load_fl < load_stable_) fl_climbed_ = true;
-        if (s.load_fr < load_stable_) fr_climbed_ = true;
+        // ever-loaded 패턴 (sketch_apr27b): 후륜이 계단에 접촉했음을 기록
+        if (s.load_rl > load_contact_) rl_climbed_ = true;
+        if (s.load_rr > load_contact_) rr_climbed_ = true;
 
-        // 부스트: 어느 바퀴라도 BOOST_LOAD 초과 시 속도 증가
         bool boost = (s.load_fl > BOOST_LOAD || s.load_fr > BOOST_LOAD ||
                       s.load_rl > BOOST_LOAD || s.load_rr > BOOST_LOAD);
-        int32_t full = mps_to_dxl(boost ? spd_climb_boost_ : spd_climb_f_);
-        int32_t slow = mps_to_dxl(spd_slow_);
-        int32_t rear = full;
+        int32_t spd = mps_to_dxl(boost ? spd_climb_boost_ : spd_climb_f_);
 
-        cmd.target_vel_fl = -(fl_climbed_ ? slow : full);
-        cmd.target_vel_fr = -(fr_climbed_ ? slow : full);
-        cmd.target_vel_rl = rear;
-        cmd.target_vel_rr = rear;
+        // 4바퀴 동일 속도 (sketch_apr27b)
+        cmd.target_vel_fl = -spd;
+        cmd.target_vel_fr = -spd;
+        cmd.target_vel_rl =  spd;
+        cmd.target_vel_rr =  spd;
 
         auto ws = ik_steer_only(0.0, 0.0);
         cmd.target_steer_pos_l = ws.steer_f;
         cmd.target_steer_pos_r = ws.steer_r;
 
-        // 극복 완료: FL/FR 극복 + 전/후륜 모두 부하 감소 연속 확인
-        // (FRONT_CLIMB 중 후륜은 평지에 있으므로 rl_ever_loaded 조건 불필요)
         bool all_clear = (s.load_fl < load_stable_ && s.load_fr < load_stable_ &&
                           s.load_rl < load_stable_ && s.load_rr < load_stable_);
-        if (fl_climbed_ && fr_climbed_ && all_clear) {
+
+        // 완료: 후륜 하나라도 접촉 후 4바퀴 모두 부하 해소 (|| 조건)
+        if ((rl_climbed_ || rr_climbed_) && all_clear) {
           stair_clear_count_++;
           if (stair_clear_count_ >= STAIR_CLEAR_COUNT) {
             RCLCPP_INFO(get_logger(),
-              "[FRONT_CLIMB] FL/FR 극복 완료 (%d회 확인) → FRONT_STABILIZE",
-              STAIR_CLEAR_COUNT);
+              "[STAIR_CLIMB] 극복 완료 (%d회 확인) → FRONT_STABILIZE", STAIR_CLEAR_COUNT);
             transition(State::FRONT_STABILIZE, now);
           }
         } else {
           stair_clear_count_ = 0;
         }
 
+        // 8초 타임아웃 (sketch_apr27b STAIR_CLIMB_TIMEOUT)
+        if (elapsed(now) > 8.0) {
+          RCLCPP_WARN(get_logger(), "[STAIR_CLIMB] 타임아웃 → FRONT_STABILIZE");
+          transition(State::FRONT_STABILIZE, now);
+        }
         break;
       }
 
