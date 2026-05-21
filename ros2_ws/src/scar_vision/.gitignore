@@ -1,0 +1,9 @@
+.vscode/
+weights/*.pt
+weights/*.onnx
+weights/*.engine
+__pycache__/
+*.pyc
+build/
+install/
+log/
